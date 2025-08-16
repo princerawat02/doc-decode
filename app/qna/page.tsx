@@ -1,21 +1,38 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { FileText, Send, MessageSquare, Lightbulb, ArrowLeft, Copy, ThumbsUp, ThumbsDown } from 'lucide-react';
 import Link from 'next/link';
 import Navigation from '../../components/Navigation';
 
+interface Message {
+  id: number;
+  type: 'user' | 'ai';
+  content: string;
+  timestamp: Date;
+  isStreaming?: boolean; // New property to track streaming state
+}
+
 export default function QnaPage() {
   const [question, setQuestion] = useState('');
-  const [messages, setMessages] = useState([
+  const [messages, setMessages] = useState<Message[]>([
     {
       id: 1,
       type: 'ai',
-      content: 'Hello! I\'ve analyzed your employment agreement. I can help you understand any part of the document, explain specific clauses, assess risks, or answer questions about your obligations. What would you like to know?',
+      content: 'Hello! I\'m your AI assistant powered by Google Cloud Vertex AI. I can help you understand your documents, answer questions, and provide insights. What would you like to know?',
       timestamp: new Date()
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
+  
+  // Ref to track if we're currently streaming
+  const isStreamingRef = useRef(false);
+
+  // Document context - this would come from your document processing
+  const documentContext = `Employment Agreement between Company XYZ and John Smith
+  Position: Senior Software Engineer
+  Duration: 12 months
+  Key terms include confidentiality clauses, non-compete restrictions, intellectual property assignment, and standard employment obligations.`;
 
   // Suggested questions
   const suggestedQuestions = [
@@ -29,60 +46,154 @@ export default function QnaPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!question.trim()) return;
+    if (!question.trim() || isStreamingRef.current) return;
 
-    const userMessage = {
+    const userMessage: Message = {
       id: messages.length + 1,
-      type: 'user' as const,
+      type: 'user',
       content: question,
       timestamp: new Date()
     };
 
+    // Add user message to chat
     setMessages(prev => [...prev, userMessage]);
     setQuestion('');
     setIsLoading(true);
 
-    // Simulate AI response
-    setTimeout(() => {
-      const aiResponse = {
-        id: messages.length + 2,
-        type: 'ai' as const,
-        content: generateAIResponse(question),
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, aiResponse]);
-      setIsLoading(false);
-    }, 1500);
-  };
-
-  const generateAIResponse = (userQuestion: string) => {
-    const responses = {
-      'obligations': 'Based on your employment agreement, your main obligations include:\n\n1. **Confidentiality**: You must maintain confidentiality of company information during and after employment\n2. **Notice Period**: 30 days written notice required for resignation\n3. **Intellectual Property**: All work-related IP must be assigned to the company\n4. **Non-compete**: 12-month restriction on competing businesses after termination\n5. **Duties**: Perform assigned duties to the best of your ability',
-      'termination': 'Regarding early termination:\n\n- **Employee-initiated**: 30 days written notice required\n- **Company-initiated**: Can terminate with cause immediately, or with 2 weeks notice without cause\n- **Severance**: No severance pay unless specified in company policy\n- **Final Pay**: All outstanding compensation paid within 30 days\n- **Return of Property**: Must return all company property and materials',
-      'non-compete': 'The non-compete clause (Section 8.2) includes:\n\n- **Duration**: 12 months after termination\n- **Geographic Scope**: Within 50 miles of company locations\n- **Restricted Activities**: Cannot work for competing businesses or start competing business\n- **Penalties**: Legal action and damages for violations\n- **Exceptions**: May be unenforceable in some jurisdictions',
-      'intellectual property': 'IP rights under your agreement:\n\n- **Assignment**: All work-related IP belongs to company\n- **Scope**: Includes inventions, software, processes created during employment\n- **Ownership**: Company owns IP even if created outside work hours if related to business\n- **Disclosure**: Must disclose all IP to company\n- **Compensation**: No additional compensation for IP assignment',
-      'notice period': 'The notice period requirements:\n\n- **Duration**: 30 days written notice\n- **Format**: Must be in writing and delivered to HR\n- **Timing**: Notice period begins from date of delivery\n- **Duties**: Continue normal duties during notice period\n- **Consequences**: Failure to provide notice may affect references',
-      'benefits': 'Your benefits package includes:\n\n- **Health Insurance**: Comprehensive medical, dental, vision coverage\n- **Retirement**: 401(k) with company match up to 4%\n- **PTO**: 20 days paid time off annually\n- **Holidays**: 10 paid holidays per year\n- **Professional Development**: $2,000 annual budget for courses/certifications'
+    // Create initial AI message placeholder for streaming
+    const aiMessageId = messages.length + 2;
+    const initialAiMessage: Message = {
+      id: aiMessageId,
+      type: 'ai',
+      content: '',
+      timestamp: new Date(),
+      isStreaming: true
     };
 
-    const questionLower = userQuestion.toLowerCase();
-    if (questionLower.includes('obligation')) return responses.obligations;
-    if (questionLower.includes('terminat')) return responses.termination;
-    if (questionLower.includes('non-compete') || questionLower.includes('compete')) return responses['non-compete'];
-    if (questionLower.includes('intellectual') || questionLower.includes('ip')) return responses['intellectual property'];
-    if (questionLower.includes('notice')) return responses['notice period'];
-    if (questionLower.includes('benefit')) return responses.benefits;
+    // Add AI message placeholder
+    setMessages(prev => [...prev, initialAiMessage]);
 
-    return 'I understand your question about the employment agreement. Let me provide you with a detailed analysis based on the specific clauses in your document. Could you please clarify which aspect you\'d like me to focus on?';
+    try {
+      // Start streaming request
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: question,
+          documentContext: documentContext,
+          chatHistory: messages.slice(-5) // Send last 5 messages for context
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      // Check if response is streamable
+      if (!response.body) {
+        throw new Error('Response body is not available for streaming');
+      }
+
+      // Set streaming flag
+      isStreamingRef.current = true;
+
+      // Get the reader from the response body
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedContent = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) {
+            break;
+          }
+
+          // Decode the chunk and process it
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6); // Remove 'data: ' prefix
+              
+              if (data === '[DONE]') {
+                // Streaming completed
+                break;
+              }
+
+              try {
+                const parsed = JSON.parse(data);
+                
+                if (parsed.error) {
+                  throw new Error(parsed.error);
+                }
+
+                if (parsed.chunk) {
+                  // Accumulate the content
+                  accumulatedContent += parsed.chunk;
+                  
+                  // Update the AI message with accumulated content
+                  setMessages(prev => prev.map(msg => 
+                    msg.id === aiMessageId 
+                      ? { ...msg, content: accumulatedContent }
+                      : msg
+                  ));
+                }
+              } catch (parseError) {
+                console.warn('Failed to parse chunk:', parseError);
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      // Mark streaming as complete
+      setMessages(prev => prev.map(msg => 
+        msg.id === aiMessageId 
+          ? { ...msg, isStreaming: false }
+          : msg
+      ));
+
+    } catch (error) {
+      console.error('Chat API Error:', error);
+      
+      // Remove the streaming message and add error message
+      setMessages(prev => prev.filter(msg => msg.id !== aiMessageId));
+      
+      const fallbackResponse: Message = {
+        id: aiMessageId,
+        type: 'ai',
+        content: 'I apologize, but I\'m experiencing technical difficulties right now. Please try again in a moment, or contact support if the issue persists.',
+        timestamp: new Date()
+      };
+
+      setMessages(prev => [...prev, fallbackResponse]);
+    } finally {
+      setIsLoading(false);
+      isStreamingRef.current = false;
+    }
   };
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
   };
 
+  // Auto-scroll to bottom when new messages arrive
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
-      <Navigation currentStep={4} totalSteps={4} showBackButton={true} backHref="/summary" backLabel="Back to Summary" />
+      <Navigation />
 
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="grid lg:grid-cols-3 gap-8">
@@ -96,8 +207,8 @@ export default function QnaPage() {
                     <MessageSquare className="w-5 h-5 text-white" />
                   </div>
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-900">Document Q&A</h2>
-                    <p className="text-sm text-slate-600">Ask questions about your employment agreement</p>
+                    <h2 className="text-lg font-semibold text-slate-900">AI Document Assistant</h2>
+                    <p className="text-sm text-slate-600">Powered by Google Cloud Vertex AI (Streaming)</p>
                   </div>
                 </div>
               </div>
@@ -116,12 +227,18 @@ export default function QnaPage() {
                           : 'bg-slate-100 text-slate-900'
                       }`}
                     >
-                      <div className="whitespace-pre-wrap">{message.content}</div>
+                      <div className="whitespace-pre-wrap">
+                        {message.content}
+                        {/* Show typing indicator for streaming messages */}
+                        {message.isStreaming && (
+                          <span className="inline-block w-2 h-4 bg-blue-500 ml-1 animate-pulse"></span>
+                        )}
+                      </div>
                       <div className={`flex items-center justify-between mt-2 text-xs ${
                         message.type === 'user' ? 'text-blue-100' : 'text-slate-500'
                       }`}>
                         <span>{message.timestamp.toLocaleTimeString()}</span>
-                        {message.type === 'ai' && (
+                        {message.type === 'ai' && !message.isStreaming && (
                           <div className="flex items-center space-x-2">
                             <button className="hover:text-blue-600 transition-colors">
                               <ThumbsUp className="w-3 h-3" />
@@ -142,7 +259,8 @@ export default function QnaPage() {
                   </div>
                 ))}
                 
-                {isLoading && (
+                {/* Loading indicator for initial request */}
+                {isLoading && !messages.some(msg => msg.isStreaming) && (
                   <div className="flex justify-start">
                     <div className="bg-slate-100 text-slate-900 p-4 rounded-lg">
                       <div className="flex items-center space-x-2">
@@ -152,6 +270,9 @@ export default function QnaPage() {
                     </div>
                   </div>
                 )}
+                
+                {/* Invisible div for auto-scrolling */}
+                <div ref={messagesEndRef} />
               </div>
 
               {/* Input Form */}
@@ -163,11 +284,11 @@ export default function QnaPage() {
                     onChange={(e) => setQuestion(e.target.value)}
                     placeholder="Ask a question about your document..."
                     className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    disabled={isLoading}
+                    disabled={isLoading || isStreamingRef.current}
                   />
                   <button
                     type="submit"
-                    disabled={!question.trim() || isLoading}
+                    disabled={!question.trim() || isLoading || isStreamingRef.current}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
                   >
                     <Send className="w-4 h-4" />
@@ -190,7 +311,8 @@ export default function QnaPage() {
                   <button
                     key={index}
                     onClick={() => setQuestion(suggestedQuestion)}
-                    className="w-full text-left p-3 text-sm text-slate-700 hover:bg-slate-50 rounded-lg transition-colors"
+                    disabled={isStreamingRef.current}
+                    className="w-full text-left p-3 text-sm text-slate-700 hover:bg-slate-50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {suggestedQuestion}
                   </button>
@@ -221,6 +343,29 @@ export default function QnaPage() {
               </div>
             </div>
 
+            {/* AI Status */}
+            <div className="bg-green-50 border border-green-200 rounded-xl p-6">
+              <h3 className="text-lg font-semibold text-green-900 mb-3">🤖 AI Status</h3>
+              <div className="space-y-2 text-sm text-green-800">
+                <div className="flex items-center space-x-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span>Vertex AI Connected</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span>Gemini 1.5 Pro Active</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span>Streaming Enabled</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span>Document Context Loaded</span>
+                </div>
+              </div>
+            </div>
+
             {/* Tips */}
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-6">
               <h3 className="text-lg font-semibold text-blue-900 mb-3">💡 Tips</h3>
@@ -229,6 +374,7 @@ export default function QnaPage() {
                 <li>• Request clarification on legal terms</li>
                 <li>• Ask about your rights and obligations</li>
                 <li>• Get explanations of complex sections</li>
+                <li>• Watch responses appear in real-time!</li>
               </ul>
             </div>
           </div>
