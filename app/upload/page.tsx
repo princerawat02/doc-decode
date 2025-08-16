@@ -62,7 +62,9 @@ export default function FileUploadBox() {
       });
       if (!res.ok) throw new Error('Failed to extract text');
       const data = await res.json();
-      setExtractedText(data.text || 'No text found.');
+      // Save to localStorage and redirect
+      localStorage.setItem('extractedText', data.text || 'No text found.');
+      window.location.href = '/summary';
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message || 'Extraction failed');
@@ -73,7 +75,6 @@ export default function FileUploadBox() {
       setExtracting(false);
     }
   };
-
   return (
     <Card className="max-w-md mx-auto p-6 rounded-2xl shadow-lg">
       <CardContent>
